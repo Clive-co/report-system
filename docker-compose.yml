@@ -1,0 +1,15 @@
+# docker-compose.yml
+services:
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: icpc
+      POSTGRES_PASSWORD: devpassword
+      POSTGRES_DB: icpc_reports
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+volumes:
+  pgdata:

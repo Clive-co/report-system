@@ -1,0 +1,39 @@
+// prisma/schema.prisma
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+model Report {
+  id          String      @id @default(uuid())
+  state       String
+  city        String
+  address     String
+  description String
+  createdAt   DateTime    @default(now())
+  media       Media[]
+  informant   Informant?
+}
+
+model Media {
+  id       String @id @default(uuid())
+  reportId String
+  report   Report @relation(fields: [reportId], references: [id], onDelete: Cascade)
+  key      String
+  type     String
+}
+
+model Informant {
+  id         String @id @default(uuid())
+  reportId   String @unique
+  report     Report @relation(fields: [reportId], references: [id], onDelete: Cascade)
+  nameEnc    Bytes?
+  phoneEnc   Bytes?
+  emailEnc   Bytes?
+  addressEnc Bytes?
+}
