@@ -30,6 +30,21 @@ app.use(
   reportsRouter
 );
 
+// Catches errors thrown by upstream middleware (e.g. express.json() failing
+// to parse a malformed/mislabeled body) before any route handler runs.
+// Without this, those failures return a 400 silently with nothing logged.
+app.use((err: any, req: express.Request, res: express.Response, next: express.NextFunction) => {
+  console.error('Unhandled request error:', {
+    message: err?.message,
+    type: err?.type,
+    status: err?.status || err?.statusCode,
+    path: req.path,
+    contentType: req.headers['content-type'],
+    contentLength: req.headers['content-length'],
+  });
+  res.status(err?.status || err?.statusCode || 500).json({ error: 'Server error' });
+});
+
 const PORT = Number(process.env.PORT) || 4000;
 app.listen(PORT, '0.0.0.0', () => {
   console.log(`Server listening on port ${PORT}`);
