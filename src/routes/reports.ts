@@ -32,7 +32,10 @@ const MAX_UPLOAD_BYTES = 50 * 1024 * 1024; // 50MB
 
 router.post('/upload-url', async (req, res) => {
   const parsed = uploadUrlSchema.safeParse(req.body);
-  if (!parsed.success) return res.status(400).json({ error: 'Invalid request' });
+  if (!parsed.success) {
+    console.error('upload-url validation failed:', req.body, parsed.error.flatten());
+    return res.status(400).json({ error: 'Invalid request' });
+  }
 
   const ext = parsed.data.filename.split('.').pop()?.toLowerCase() ?? '';
   const allowed = ALLOWED_EXTENSIONS[parsed.data.type] ?? [];
