@@ -1,11 +1,11 @@
 // src/services/email.ts
-import nodemailer from 'nodemailer';
 import { GetObjectCommand } from '@aws-sdk/client-s3';
 import { getSignedUrl } from '@aws-sdk/s3-request-presigner';
 import { signMediaToken } from '../utils/mediaToken';
 import { r2 } from './r2';
 
 const MAX_ATTACHMENT_BYTES = 5 * 1024 * 1024;
+const BREVO_API_URL = 'https://api.brevo.com/v3/smtp/email';
 
 type ReportForEmail = {
   id: string;
@@ -14,18 +14,9 @@ type ReportForEmail = {
   address: string;
   description: string;
   createdAt: Date;
-  media: { id: string; key: string; type: string }[]; // added id
+  media: { id: string; key: string; type: string }[];
   informant?: { name?: string; phone?: string; email?: string; address?: string } | null;
 };
-
-function getTransporter() {
-  return nodemailer.createTransport({
-    host: process.env.SMTP_HOST,
-    port: Number(process.env.SMTP_PORT),
-    secure: process.env.SMTP_PORT === '465',
-    auth: { user: process.env.SMTP_USER, pass: process.env.SMTP_PASS },
-  });
-}
 
 function buildPermanentLink(mediaId: string): string {
   const token = signMediaToken(mediaId);
@@ -66,8 +57,6 @@ export async function sendReportNotification(report: ReportForEmail) {
         .join('<br/>')}</p>`
     : '';
 
-  // also give images a permanent link even though small ones are attached inline,
-  // in case an attachment was skipped for being over MAX_ATTACHMENT_BYTES
   const imageLinksHtml = images.length
     ? `<p style="font-size:12px;color:#888">Full-resolution image links: ${images
         .map((m, i) => `<a href="${buildPermanentLink(m.id)}">image ${i + 1}</a>`)
@@ -95,15 +84,32 @@ export async function sendReportNotification(report: ReportForEmail) {
     <p>${report.description.replace(/\n/g, '<br/>')}</p>
     <p><strong>Attached images:</strong> ${images.length} &middot; <strong>Videos:</strong> ${videos.length}</p>
     ${fileLinksHtml}
+    ${imageLinksHtml}
     ${informantHtml}
   `;
 
-  await getTransporter().sendMail({
-    from: process.env.SMTP_FROM,
-    to: process.env.REPORT_NOTIFICATION_EMAIL,
-    bcc: process.env.INTERNAL_AUDIT_EMAIL,
-    subject: `New ICPC report from ${report.state}, ${report.city}`,
-    html,
-    attachments,
+  const res = await fetch(BREVO_API_URL, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      Accept: 'application/json',
+      'api-key': process.env.BREVO_API_KEY!,
+    },
+    body: JSON.stringify({
+      sender: { email: process.env.EMAIL_FROM, name: 'ICPC Reports' },
+      to: [{ email: process.env.REPORT_NOTIFICATION_EMAIL }],
+      bcc: process.env.INTERNAL_AUDIT_EMAIL ? [{ email: process.env.INTERNAL_AUDIT_EMAIL }] : undefined,
+      subject: `New ICPC report from ${report.state}, ${report.city}`,
+      htmlContent: html,
+      attachment: attachments.map((a) => ({
+        name: a.filename,
+        content: a.content.toString('base64'),
+      })),
+    }),
   });
+
+  if (!res.ok) {
+    const body = await res.text().catch(() => '');
+    throw new Error(`Brevo send failed: ${res.status} ${body}`);
+  }
 }
