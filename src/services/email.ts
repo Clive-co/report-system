@@ -101,10 +101,14 @@ export async function sendReportNotification(report: ReportForEmail) {
       bcc: process.env.INTERNAL_AUDIT_EMAIL ? [{ email: process.env.INTERNAL_AUDIT_EMAIL }] : undefined,
       subject: `New ICPC report from ${report.state}, ${report.city}`,
       htmlContent: html,
-      attachment: attachments.map((a) => ({
-        name: a.filename,
-        content: a.content.toString('base64'),
-      })),
+      ...(attachments.length > 0
+        ? {
+            attachment: attachments.map((a) => ({
+              name: a.filename,
+              content: a.content.toString('base64'),
+            })),
+          }
+        : {}),
     }),
   });
 

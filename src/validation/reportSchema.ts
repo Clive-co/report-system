@@ -11,7 +11,7 @@ export const reportSchema = z.object({
   city: z.string().min(1).max(80),
   address: z.string().min(3).max(150),
   description: z.string().min(10).max(1000),
-  mediaKeys: z.array(z.string()).max(5).default([]),
+  mediaKeys: z.array(z.string()).min(1, 'At least one piece of evidence is required').max(5),
   informant: z
     .object({
       name: z.string().max(120).optional(),
