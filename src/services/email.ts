@@ -5,6 +5,9 @@ import { signMediaToken } from '../utils/mediaToken';
 import { r2 } from './r2';
 
 const MAX_ATTACHMENT_BYTES = 5 * 1024 * 1024;
+// Brevo caps the combined size of attachments on a transactional email (~4MB).
+// Anything that doesn't fit is still reachable through its permanent link.
+const MAX_TOTAL_ATTACHMENT_BYTES = 4 * 1024 * 1024;
 const BREVO_API_URL = 'https://api.brevo.com/v3/smtp/email';
 
 type ReportForEmail = {
@@ -18,25 +21,30 @@ type ReportForEmail = {
   informant?: { name?: string; phone?: string; email?: string; address?: string } | null;
 };
 
+function escapeHtml(value: string): string {
+  return value
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
+}
+
+function fileName(key: string): string {
+  return key.split('/').pop()!;
+}
+
 function buildPermanentLink(mediaId: string): string {
   const token = signMediaToken(mediaId);
   return `${process.env.PUBLIC_API_URL}/api/reports/media/${mediaId}/view?token=${token}`;
 }
 
-async function getVideoLink(key: string) {
-  return getSignedUrl(
-    r2,
-    new GetObjectCommand({ Bucket: process.env.R2_BUCKET!, Key: key }),
-    { expiresIn: 60 * 60 * 24 }
-  );
-}
-
-async function fetchImageAttachment(key: string) {
+async function fetchAttachment(key: string) {
   try {
     const obj = await r2.send(new GetObjectCommand({ Bucket: process.env.R2_BUCKET!, Key: key }));
     const body = await obj.Body?.transformToByteArray();
     if (!body || body.byteLength > MAX_ATTACHMENT_BYTES) return null;
-    return { filename: key.split('/').pop()!, content: Buffer.from(body) };
+    return { filename: fileName(key), content: Buffer.from(body) };
   } catch {
     return null;
   }
@@ -47,15 +55,29 @@ export async function sendReportNotification(report: ReportForEmail) {
   const videos = report.media.filter((m) => m.type === 'video');
   const documents = report.media.filter((m) => m.type === 'document');
 
-  const attachments = (
-    await Promise.all(images.map((img) => fetchImageAttachment(img.key)))
-  ).filter((a): a is NonNullable<typeof a> => a !== null);
+  // Attach images and documents (videos are too large — link only).
+  // Attach sequentially-by-result so we can enforce the total size cap.
+  const candidates = [...images, ...documents];
+  const fetched = await Promise.all(candidates.map((m) => fetchAttachment(m.key)));
 
-  const fileLinksHtml = (videos.length || documents.length)
-    ? `<p><strong>Video and document evidence (permanent link — always works):</strong><br/>${[...videos, ...documents]
-        .map((m) => `<a href="${buildPermanentLink(m.id)}">${m.key.split('/').pop()}</a>`)
-        .join('<br/>')}</p>`
-    : '';
+  const attachments: { filename: string; content: Buffer }[] = [];
+  let totalBytes = 0;
+  for (const a of fetched) {
+    if (!a) continue;
+    if (totalBytes + a.content.byteLength > MAX_TOTAL_ATTACHMENT_BYTES) continue;
+    totalBytes += a.content.byteLength;
+    attachments.push(a);
+  }
+
+  const fileLinksHtml =
+    videos.length || documents.length
+      ? `<p><strong>Video and document evidence (permanent link — always works):</strong><br/>${[
+          ...videos,
+          ...documents,
+        ]
+          .map((m) => `<a href="${buildPermanentLink(m.id)}">${escapeHtml(fileName(m.key))}</a>`)
+          .join('<br/>')}</p>`
+      : '';
 
   const imageLinksHtml = images.length
     ? `<p style="font-size:12px;color:#888">Full-resolution image links: ${images
@@ -63,26 +85,27 @@ export async function sendReportNotification(report: ReportForEmail) {
         .join(', ')}</p>`
     : '';
 
-  const informantHtml = report.informant
+  const inf = report.informant;
+  const informantHtml = inf
     ? `
       <h3>Informant details (optional, provided by reporter)</h3>
       <p>
-        Name: ${report.informant.name || 'Not provided'}<br/>
-        Phone: ${report.informant.phone || 'Not provided'}<br/>
-        Email: ${report.informant.email || 'Not provided'}<br/>
-        Address: ${report.informant.address || 'Not provided'}
+        Name: ${escapeHtml(inf.name || 'Not provided')}<br/>
+        Phone: ${escapeHtml(inf.phone || 'Not provided')}<br/>
+        Email: ${escapeHtml(inf.email || 'Not provided')}<br/>
+        Address: ${escapeHtml(inf.address || 'Not provided')}
       </p>`
     : `<p><em>Report submitted anonymously — no informant details provided.</em></p>`;
 
   const html = `
     <h2>New corruption report</h2>
-    <p style="color:#666;font-size:13px">Reference: ${report.id}</p>
+    <p style="color:#666;font-size:13px">Reference: ${escapeHtml(report.id)}</p>
     <p><strong>Submitted:</strong> ${report.createdAt.toISOString()}</p>
     <h3>Case details</h3>
-    <p>State: ${report.state}<br/>City: ${report.city}<br/>Address: ${report.address}</p>
+    <p>State: ${escapeHtml(report.state)}<br/>City: ${escapeHtml(report.city)}<br/>Address: ${escapeHtml(report.address)}</p>
     <h3>Report description</h3>
-    <p>${report.description.replace(/\n/g, '<br/>')}</p>
-    <p><strong>Attached images:</strong> ${images.length} &middot; <strong>Videos:</strong> ${videos.length}</p>
+    <p>${escapeHtml(report.description).replace(/\n/g, '<br/>')}</p>
+    <p><strong>Attached images:</strong> ${images.length} &middot; <strong>Videos:</strong> ${videos.length} &middot; <strong>Documents:</strong> ${documents.length}</p>
     ${fileLinksHtml}
     ${imageLinksHtml}
     ${informantHtml}
