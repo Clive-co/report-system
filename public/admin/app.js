@@ -262,8 +262,13 @@ function passwordInput(autocomplete, extra = {}) {
 
 function authLayout(card) {
   return h('div', { class: 'auth' },
-    h('section', { class: 'auth-brand' },
-      h('div', { class: 'mark' }, h('span', { class: 'logo' }, icon('ShieldCheck', 22)), 'ICPC case desk'),
+    h('div', { class: 'side-brand' },
+      h('img', {
+        class: 'logo',
+        src: '/admin/assets/icpc-logo.png',
+        alt: '',
+      }),
+      'ICPC case desk'),
       h('div', { class: 'pitch' },
         h('h2', null, 'Every report, reviewed and on record.'),
         h('p', null, 'Read incoming reports, move them through review, and keep a trail of who did what.')
