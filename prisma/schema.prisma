@@ -9,23 +9,53 @@ datasource db {
   url      = env("DATABASE_URL")
 }
 
+enum ReportStatus {
+  RECEIVED
+  UNDER_REVIEW
+  INVESTIGATING
+  RESOLVED
+  DISMISSED
+}
+
+enum AdminRole {
+  SUPER_ADMIN // can manage admin accounts and read the activity log
+  OFFICER     // can view reports and update statuses
+}
+
 model Report {
-  id          String      @id @default(uuid())
+  id          String   @id @default(uuid())
   state       String
   city        String
   address     String
   description String
-  createdAt   DateTime    @default(now())
-  media       Media[]
-  informant   Informant?
+  createdAt   DateTime @default(now())
+
+  // ── tracking ──
+  // Optional only so the migration can run on existing rows. After running
+  // scripts/backfill-tracking-codes.ts, change to `String @unique` and migrate again.
+  trackingCode    String?      @unique
+  status          ReportStatus @default(RECEIVED)
+  statusUpdatedAt DateTime     @default(now())
+
+  media     Media[]
+  informant Informant?
+  events    StatusEvent[]
+
+  // Keyset-pagination indexes: "latest reports", "latest reports with status X" and
+  // "latest reports in state Y" stay fast with millions of rows.
+  @@index([status, createdAt(sort: Desc), id(sort: Desc)])
+  @@index([createdAt(sort: Desc), id(sort: Desc)])
+  @@index([state, createdAt(sort: Desc)])
 }
 
 model Media {
   id       String @id @default(uuid())
   reportId String
   report   Report @relation(fields: [reportId], references: [id], onDelete: Cascade)
-  key      String
+  key      String @unique // a storage key can only belong to one report
   type     String
+
+  @@index([reportId])
 }
 
 model Informant {
@@ -36,4 +66,67 @@ model Informant {
   phoneEnc   Bytes?
   emailEnc   Bytes?
   addressEnc Bytes?
+}
+
+model StatusEvent {
+  id           String        @id @default(cuid())
+  reportId     String
+  report       Report        @relation(fields: [reportId], references: [id], onDelete: Cascade)
+  fromStatus   ReportStatus?
+  toStatus     ReportStatus
+  publicNote   String? // shown to the reporter in the mobile app
+  internalNote String? // officials only
+  adminId      String?
+  admin        Admin?        @relation(fields: [adminId], references: [id], onDelete: SetNull)
+  actorEmail   String? // snapshot, so history survives deleting an admin
+  createdAt    DateTime      @default(now())
+
+  @@index([reportId, createdAt])
+}
+
+model Admin {
+  id                 String    @id @default(cuid())
+  email              String    @unique
+  name               String
+  role               AdminRole @default(OFFICER)
+  passwordHash       String
+  mustChangePassword Boolean   @default(true)
+  failedAttempts     Int       @default(0)
+  lockedUntil        DateTime?
+  lastLoginAt        DateTime?
+  createdAt          DateTime  @default(now())
+
+  sessions  AdminSession[]
+  events    StatusEvent[]
+  auditLogs AuditLog[]
+}
+
+model AdminSession {
+  id         String   @id @default(cuid())
+  tokenHash  String   @unique // SHA-256 of the cookie token; the raw token is never stored
+  adminId    String
+  admin      Admin    @relation(fields: [adminId], references: [id], onDelete: Cascade)
+  createdAt  DateTime @default(now())
+  lastSeenAt DateTime @default(now())
+  expiresAt  DateTime
+  ip         String?
+  userAgent  String?
+
+  @@index([adminId])
+  @@index([expiresAt])
+}
+
+model AuditLog {
+  id         String   @id @default(cuid())
+  adminId    String?
+  admin      Admin?   @relation(fields: [adminId], references: [id], onDelete: SetNull)
+  actorEmail String?
+  action     String
+  reportId   String?
+  meta       Json?
+  ip         String?
+  createdAt  DateTime @default(now())
+
+  @@index([createdAt(sort: Desc)])
+  @@index([reportId])
 }
