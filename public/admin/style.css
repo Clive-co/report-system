@@ -136,6 +136,9 @@ h3 { font-size: 0.95rem; font-weight: 650; }
 }
 .skip:focus { top: 12px; }
 
+/* ───────── logo ───────── */
+.logo-img { background: transparent; object-fit: contain; flex: none; }
+
 /* ───────── buttons ───────── */
 .btn {
   --spinner: var(--ink);
