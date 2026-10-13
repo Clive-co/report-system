@@ -8,6 +8,9 @@
  * The only vendored code is Lucide (icons), served from /admin/vendor on your own origin.
  * Icons are built with DOM calls (no innerHTML) and styles are set through the CSSOM,
  * so both are CSP-safe.
+ *
+ * What each role can see or do comes from the server (state.me.permissions, defined in
+ * src/auth/permissions.ts). This file only hides what the API would refuse anyway.
  */
 
 const STATUSES = [
@@ -18,6 +21,7 @@ const STATUSES = [
   { key: 'DISMISSED', label: 'Dismissed' },
 ];
 const STATUS_LABEL = Object.fromEntries(STATUSES.map((s) => [s.key, s.label]));
+const ROLE_LABEL = { SUPER_ADMIN: 'Super admin', ADMIN_MANAGER: 'Admin manager', OFFICER: 'Officer' };
 
 const root = document.getElementById('app');
 const state = {
@@ -31,6 +35,7 @@ const state = {
   listLoading: false,
   listToken: 0,
 };
+const can = (perm) => !!(state.me && Array.isArray(state.me.permissions) && state.me.permissions.includes(perm));
 let els = {};      // handles to the live parts of the reports view
 let shell = null;  // handles to the app chrome (sidebar, title, main)
 let drawer = null; // the open report drawer, if any
@@ -247,6 +252,20 @@ function detailSkeleton() {
   );
 }
 
+/* ───────────── evidence ─────────────
+ * Only the super admin receives evidence (the API enforces this too). Files are served by
+ * /api/admin/media/:id/stream, which checks the role and logs a view on every request.
+ */
+
+const mediaUrl = (id) => '/api/admin/media/' + encodeURIComponent(id) + '/stream';
+
+function evidenceTile(m) {
+  const url = mediaUrl(m.id);
+  if (m.type === 'image') return h('a', { href: url, target: '_blank', rel: 'noopener noreferrer' }, h('img', { src: url, alt: 'Evidence image ' + (m.name || ''), loading: 'lazy' }));
+  if (m.type === 'video') return h('video', { src: url, controls: true, preload: 'metadata' });
+  return h('a', { class: 'file', href: url, target: '_blank', rel: 'noopener noreferrer' }, icon('File', 22), m.name || 'Document');
+}
+
 /* ───────────── auth views ───────────── */
 
 function passwordInput(autocomplete, extra = {}) {
@@ -268,14 +287,14 @@ function authLayout(card) {
         src: '/admin/assets/icpc-logo.png',
         alt: '',
       }),
-      'ICPC case desk'),
+      'ICPC case desk',
       h('div', { class: 'pitch' },
         h('h2', null, 'Every report, reviewed and on record.'),
         h('p', null, 'Read incoming reports, move them through review, and keep a trail of who did what.')
       ),
       h('ul', { class: 'pitch' },
         h('li', null, icon('Lock', 18), 'Informant details open only on request and are logged'),
-        h('li', null, icon('Clock', 18), 'Evidence links expire automatically'),
+        h('li', null, icon('Clock', 18), 'Evidence is visible to the super admin only, and every view is logged'),
         h('li', null, icon('ScrollText', 18), 'Every status change is recorded')
       )
     ),
@@ -368,14 +387,14 @@ async function signOut() {
 
 const VIEWS = {
   reports: { label: 'Reports', title: 'Reports', icon: 'FileText' },
-  admins: { label: 'Admins', title: 'Admins', icon: 'Users', superOnly: true },
-  audit: { label: 'Activity log', title: 'Activity log', icon: 'ScrollText', superOnly: true },
+  admins: { label: 'Officers', title: 'Officers', icon: 'Users', perm: 'admins:manage' },
+  audit: { label: 'Activity log', title: 'Activity log', icon: 'ScrollText', perm: 'audit:view' },
 };
+const viewAllowed = (key) => !VIEWS[key].perm || can(VIEWS[key].perm);
 
 function renderShell() {
   closeDrawer();
-  const isSuper = state.me.role === 'SUPER_ADMIN';
-  if (VIEWS[state.view]?.superOnly && !isSuper) state.view = 'reports';
+  if (!VIEWS[state.view] || !viewAllowed(state.view)) state.view = 'reports';
 
   const app = h('div', { class: 'app', 'data-nav': 'closed' });
   const setNav = (open) => {
@@ -408,7 +427,7 @@ function renderShell() {
     h('div', { class: 'side-foot' },
       h('div', { class: 'me' },
         h('span', { class: 'avatar', 'aria-hidden': 'true' }, initials(state.me.name)),
-        h('div', null, h('div', { class: 'me-name' }, state.me.name), h('div', { class: 'me-role' }, isSuper ? 'Super admin' : 'Officer'))
+        h('div', null, h('div', { class: 'me-name' }, state.me.name), h('div', { class: 'me-role' }, ROLE_LABEL[state.me.role] || state.me.role))
       ),
       themeBtn,
       h('button', { type: 'button', onClick: () => renderChangePassword(false) }, icon('KeyRound', 18), 'Change password'),
@@ -421,13 +440,13 @@ function renderShell() {
     h('div', { class: 'scrim', onClick: () => setNav(false) }),
     h('div', { class: 'content' }, h('header', { class: 'topbar' }, menuBtn, title, actions), main)
   );
-  shell = { app, nav, title, actions, main, setNav, isSuper };
+  shell = { app, nav, title, actions, main, setNav };
   root.replaceChildren(app);
   renderView();
 }
 
 function renderNav() {
-  const keys = Object.keys(VIEWS).filter((k) => !VIEWS[k].superOnly || shell.isSuper);
+  const keys = Object.keys(VIEWS).filter(viewAllowed);
   shell.nav.replaceChildren(...keys.map((key) =>
     h('button', {
       type: 'button', 'aria-current': state.view === key ? 'page' : null,
@@ -703,7 +722,7 @@ function renderDetail(r) {
   /* informant (shown only on request, and logged by the server) */
   const informantBox = h('div');
   const showBtn = h('button', { class: 'btn small', type: 'button' }, icon('Eye', 16), 'Show informant details');
-  if (r.hasInformant) {
+  if (r.hasInformant && can('informant:view')) {
     let shown = false;
     showBtn.addEventListener('click', async () => {
       if (shown) {
@@ -724,56 +743,74 @@ function renderDetail(r) {
       } finally { setBusy(showBtn, false); }
     });
   }
+  const informantSection = !r.hasInformant
+    ? h('p', { class: 'muted' }, 'Reported anonymously.')
+    : can('informant:view')
+      ? [showBtn, informantBox]
+      : h('p', { class: 'muted' }, 'Your role cannot view informant details.');
 
-  /* evidence */
-  const evidence = r.media.map((m) => {
-    if (!safeHttps(m.url)) return null;
-    if (m.type === 'image') return h('a', { href: m.url, target: '_blank', rel: 'noopener noreferrer' }, h('img', { src: m.url, alt: 'Evidence image ' + m.name, loading: 'lazy' }));
-    if (m.type === 'video') return h('video', { src: m.url, controls: true, preload: 'metadata' });
-    return h('a', { class: 'file', href: m.url, target: '_blank', rel: 'noopener noreferrer' }, icon('File', 22), m.name);
-  }).filter(Boolean);
+  /* evidence: only for roles that are allowed to see it (super admin) */
+  const evidenceCount = r.mediaRestricted ? r.mediaCount : r.media.length;
+  let evidenceBody;
+  if (r.mediaRestricted) {
+    evidenceBody = h('p', { class: 'muted' }, r.mediaCount
+      ? (r.mediaCount === 1 ? '1 evidence file is attached. ' : r.mediaCount + ' evidence files are attached. ') + 'Only the super admin can view evidence.'
+      : 'No files attached.');
+  } else if (r.media.length) {
+    evidenceBody = [
+      h('div', { class: 'ev-grid' }, r.media.map(evidenceTile)),
+      h('p', { class: 'hint' }, 'Every view of evidence is recorded in the activity log.'),
+    ];
+  } else {
+    evidenceBody = h('p', { class: 'muted' }, 'No files attached.');
+  }
 
-  /* status form */
-  let chosen = r.status;
-  const chips = h('div', { class: 'chips', role: 'radiogroup', 'aria-label': 'Status' }, STATUSES.map((s) =>
-    h('label', { class: 'chip', 'data-status': s.key },
-      h('input', { type: 'radio', name: 'status-' + r.id, value: s.key, checked: s.key === r.status, onChange: () => { chosen = s.key; } }),
-      h('span', null, s.label)
-    )
-  ));
-  const counter = (max, ta) => { const c = h('span', { class: 'hint' }, '0/' + max); ta.addEventListener('input', () => { c.textContent = ta.value.length + '/' + max; }); return c; };
-  const pub = h('textarea', { maxlength: 500, placeholder: 'Optional. The reporter can read this in the app.' });
-  const internal = h('textarea', { maxlength: 2000, placeholder: 'Optional. Only officials can read this.' });
-  const formError = h('div', { class: 'error error-line', role: 'alert' });
-  const save = h('button', { class: 'btn primary block', type: 'submit' }, 'Update status');
-  const form = h('form', {
-    onSubmit: async (e) => {
-      e.preventDefault();
-      formError.textContent = '';
-      setBusy(save, true);
-      try {
-        await api('/reports/' + encodeURIComponent(r.id) + '/status', {
-          method: 'PATCH',
-          body: { status: chosen, publicNote: pub.value.trim() || undefined, internalNote: internal.value.trim() || undefined },
-        });
-        toast('Status updated to ' + STATUS_LABEL[chosen]);
-        const jobs = [loadStats(), refreshList(true)];
-        if (drawer && state.selectedId === r.id) jobs.push(openReport(r.id, true));
-        await Promise.all(jobs);
-      } catch (err) {
-        if (!err.handled) formError.textContent = err.message;
-      } finally { setBusy(save, false); }
+  /* status form (officers and admin managers; the super admin has read-only access) */
+  let statusBody;
+  if (!can('reports:update_status')) {
+    statusBody = h('p', { class: 'muted' }, 'Your role has read-only access to report status.');
+  } else {
+    let chosen = r.status;
+    const chips = h('div', { class: 'chips', role: 'radiogroup', 'aria-label': 'Status' }, STATUSES.map((s) =>
+      h('label', { class: 'chip', 'data-status': s.key },
+        h('input', { type: 'radio', name: 'status-' + r.id, value: s.key, checked: s.key === r.status, onChange: () => { chosen = s.key; } }),
+        h('span', null, s.label)
+      )
+    ));
+    const counter = (max, ta) => { const c = h('span', { class: 'hint' }, '0/' + max); ta.addEventListener('input', () => { c.textContent = ta.value.length + '/' + max; }); return c; };
+    const pub = h('textarea', { maxlength: 500, placeholder: 'Optional. The reporter can read this in the app.' });
+    const internal = h('textarea', { maxlength: 2000, placeholder: 'Optional. Only officials can read this.' });
+    const formError = h('div', { class: 'error error-line', role: 'alert' });
+    const save = h('button', { class: 'btn primary block', type: 'submit' }, 'Update status');
+    statusBody = h('form', {
+      onSubmit: async (e) => {
+        e.preventDefault();
+        formError.textContent = '';
+        setBusy(save, true);
+        try {
+          await api('/reports/' + encodeURIComponent(r.id) + '/status', {
+            method: 'PATCH',
+            body: { status: chosen, publicNote: pub.value.trim() || undefined, internalNote: internal.value.trim() || undefined },
+          });
+          toast('Status updated to ' + STATUS_LABEL[chosen]);
+          const jobs = [loadStats(), refreshList(true)];
+          if (drawer && state.selectedId === r.id) jobs.push(openReport(r.id, true));
+          await Promise.all(jobs);
+        } catch (err) {
+          if (!err.handled) formError.textContent = err.message;
+        } finally { setBusy(save, false); }
+      },
     },
-  },
-    h('div', { class: 'field' }, h('label', null, 'Status'), chips),
-    h('div', { class: 'field' }, h('div', { class: 'field-row' }, h('label', { for: 'note-pub' }, 'Note for the reporter'), counter(500, pub)), pub,
-      h('span', { class: 'hint' }, 'Shown next to this update in the mobile app. Do not include personal details.')),
-    h('div', { class: 'field' }, h('div', { class: 'field-row' }, h('label', { for: 'note-int' }, 'Internal note'), counter(2000, internal)), internal),
-    formError,
-    save,
-  );
-  pub.id = 'note-pub';
-  internal.id = 'note-int';
+      h('div', { class: 'field' }, h('label', null, 'Status'), chips),
+      h('div', { class: 'field' }, h('div', { class: 'field-row' }, h('label', { for: 'note-pub' }, 'Note for the reporter'), counter(500, pub)), pub,
+        h('span', { class: 'hint' }, 'Shown next to this update in the mobile app. Do not include personal details.')),
+      h('div', { class: 'field' }, h('div', { class: 'field-row' }, h('label', { for: 'note-int' }, 'Internal note'), counter(2000, internal)), internal),
+      formError,
+      save,
+    );
+    pub.id = 'note-pub';
+    internal.id = 'note-int';
+  }
 
   /* history */
   const history = h('ol', { class: 'history' },
@@ -798,18 +835,16 @@ function renderDetail(r) {
     ),
     h('section', { class: 'card' }, h('h3', null, 'What happened'), h('p', { class: 'description' }, r.description)),
     h('section', { class: 'card' },
-      h('h3', null, 'Evidence', h('span', { class: 'count' }, '(' + r.media.length + ')')),
-      evidence.length ? h('div', { class: 'ev-grid' }, evidence) : h('p', { class: 'muted' }, 'No files attached.'),
-      evidence.length ? h('p', { class: 'hint' }, 'Links expire after 15 minutes. Reopen the report for fresh ones.') : null
+      h('h3', null, 'Evidence', h('span', { class: 'count' }, '(' + evidenceCount + ')')),
+      evidenceBody
     ),
-    h('section', { class: 'card' }, h('h3', null, 'Informant'),
-      r.hasInformant ? [showBtn, informantBox] : h('p', { class: 'muted' }, 'Reported anonymously.')),
-    h('section', { class: 'card' }, h('h3', null, 'Update status'), form),
+    h('section', { class: 'card' }, h('h3', null, 'Informant'), informantSection),
+    h('section', { class: 'card' }, h('h3', null, 'Update status'), statusBody),
     h('section', { class: 'card' }, h('h3', null, 'History'), history),
   );
 }
 
-/* ───────────── admins view (super admin) ───────────── */
+/* ───────────── officers view (admin manager) ───────────── */
 
 function renderAdminsView(main) {
   const listBox = h('div');
@@ -817,9 +852,9 @@ function renderAdminsView(main) {
 
   const email = h('input', { type: 'email', required: true, maxlength: 120, autocomplete: 'off' });
   const name = h('input', { type: 'text', required: true, minlength: 2, maxlength: 80, autocomplete: 'off' });
-  const role = h('select', null, h('option', { value: 'OFFICER' }, 'Officer'), h('option', { value: 'SUPER_ADMIN' }, 'Super admin'));
+  const role = h('select', { disabled: true }, h('option', { value: 'OFFICER' }, 'Officer'));
   const err = h('div', { class: 'error error-line', role: 'alert' });
-  const createBtn = h('button', { class: 'btn primary', type: 'submit' }, icon('UserPlus', 16), 'Create admin');
+  const createBtn = h('button', { class: 'btn primary', type: 'submit' }, icon('UserPlus', 16), 'Create officer');
 
   const showTemp = (title, who, password) =>
     tempBox.replaceChildren(
@@ -837,16 +872,16 @@ function renderAdminsView(main) {
       err.textContent = '';
       setBusy(createBtn, true);
       try {
-        const { admin, tempPassword } = await api('/admins', { method: 'POST', body: { email: email.value, name: name.value, role: role.value } });
-        showTemp('Admin created', admin.email, tempPassword);
+        const { admin, tempPassword } = await api('/admins', { method: 'POST', body: { email: email.value, name: name.value } });
+        showTemp('Officer created', admin.email, tempPassword);
         email.value = ''; name.value = '';
-        toast('Admin created');
+        toast('Officer created');
         load();
       } catch (e2) { if (!e2.handled) err.textContent = e2.message; }
       finally { setBusy(createBtn, false); }
     },
   },
-    h('div', { class: 'two' }, field('Email', email), field('Full name', name), field('Role', role, 'Officers review reports. Super admins also manage accounts.')),
+    h('div', { class: 'two' }, field('Email', email), field('Full name', name), field('Role', role, 'Officers review reports and update their status.')),
     err,
     createBtn,
   );
@@ -866,13 +901,13 @@ function renderAdminsView(main) {
   }
 
   async function removeAdmin(a, btn) {
-    const ok = await confirmDialog({ title: 'Remove ' + a.name + '?', message: a.email + ' will lose access immediately. This cannot be undone.', confirmLabel: 'Remove admin', danger: true });
+    const ok = await confirmDialog({ title: 'Remove ' + a.name + '?', message: a.email + ' will lose access immediately. This cannot be undone.', confirmLabel: 'Remove officer', danger: true });
     if (!ok) return;
     setBusy(btn, true);
     try {
       await api('/admins/' + encodeURIComponent(a.id), { method: 'DELETE' });
       tempBox.replaceChildren();
-      toast('Admin removed');
+      toast('Officer removed');
       load();
     } catch (e4) { if (!e4.handled) toast(e4.message, 'error'); setBusy(btn, false); }
   }
@@ -881,23 +916,24 @@ function renderAdminsView(main) {
     try {
       const { admins } = await api('/admins');
       listBox.replaceChildren(
-        h('div', { class: 'table-wrap' },
-          h('table', { class: 'tbl' },
-            h('thead', null, h('tr', null, COLS.map((t) => h('th', { scope: 'col' }, t)))),
-            h('tbody', null, admins.map((a) => {
-              const isMe = a.id === state.me.id;
-              const resetBtn = h('button', { class: 'btn small', type: 'button', onClick: () => resetPassword(a, resetBtn) }, icon('KeyRound', 15), 'Reset password');
-              const removeBtn = h('button', { class: 'btn small danger', type: 'button', onClick: () => removeAdmin(a, removeBtn) }, icon('Trash2', 15), 'Remove');
-              return h('tr', null,
-                h('td', { class: 'lead' }, h('strong', null, a.name), isMe ? h('span', { class: 'muted' }, ' (you)') : null),
-                h('td', { 'data-label': 'Email' }, a.email),
-                h('td', { 'data-label': 'Role' }, h('span', { class: 'pill' + (a.role === 'SUPER_ADMIN' ? ' accent' : '') }, a.role === 'SUPER_ADMIN' ? 'Super admin' : 'Officer')),
-                h('td', { class: 'num', 'data-label': 'Last sign-in' }, a.lastLoginAt ? fmt(a.lastLoginAt) : (a.mustChangePassword ? 'Has not signed in yet' : '—')),
-                h('td', { class: 'actions-cell' }, isMe ? null : h('div', { class: 'actions' }, resetBtn, removeBtn)),
-              );
-            }))
-          )
-        )
+        admins.length
+          ? h('div', { class: 'table-wrap' },
+              h('table', { class: 'tbl' },
+                h('thead', null, h('tr', null, COLS.map((t) => h('th', { scope: 'col' }, t)))),
+                h('tbody', null, admins.map((a) => {
+                  const resetBtn = h('button', { class: 'btn small', type: 'button', onClick: () => resetPassword(a, resetBtn) }, icon('KeyRound', 15), 'Reset password');
+                  const removeBtn = h('button', { class: 'btn small danger', type: 'button', onClick: () => removeAdmin(a, removeBtn) }, icon('Trash2', 15), 'Remove');
+                  return h('tr', null,
+                    h('td', { class: 'lead' }, h('strong', null, a.name)),
+                    h('td', { 'data-label': 'Email' }, a.email),
+                    h('td', { 'data-label': 'Role' }, h('span', { class: 'pill' }, ROLE_LABEL[a.role] || a.role)),
+                    h('td', { class: 'num', 'data-label': 'Last sign-in' }, a.lastLoginAt ? fmt(a.lastLoginAt) : (a.mustChangePassword ? 'Has not signed in yet' : '—')),
+                    h('td', { class: 'actions-cell' }, h('div', { class: 'actions' }, resetBtn, removeBtn)),
+                  );
+                }))
+              )
+            )
+          : emptyState('Users', 'No officers yet', 'Create the first officer above.')
       );
     } catch (e5) { if (!e5.handled) listBox.replaceChildren(errorPanel(e5.message, load)); }
   }
@@ -905,10 +941,10 @@ function renderAdminsView(main) {
   listBox.append(tableSkeleton(COLS, 4));
   main.append(h('div', { class: 'stack' },
     h('section', { class: 'card' },
-      h('div', { class: 'card-head' }, h('div', null, h('h2', null, 'Add an admin'), h('p', { class: 'muted small' }, 'They get a temporary password and must choose their own on first sign-in.'))),
+      h('div', { class: 'card-head' }, h('div', null, h('h2', null, 'Add an officer'), h('p', { class: 'muted small' }, 'They get a temporary password and must choose their own on first sign-in.'))),
       createForm, tempBox),
     h('section', { class: 'card flush' },
-      h('div', { class: 'card-head', style: null }, h('h2', { class: 'pad' }, 'Admins')),
+      h('div', { class: 'card-head', style: null }, h('h2', { class: 'pad' }, 'Officers')),
       listBox),
   ));
   load();
@@ -947,7 +983,7 @@ function renderAuditView(main) {
 
   shell.actions.append(refreshButton(async () => { box.replaceChildren(tableSkeleton(COLS, 8)); await load(); }));
   main.append(h('section', { class: 'card flush' },
-    h('div', { class: 'card-head' }, h('div', null, h('h2', null, 'Latest activity'), h('p', { class: 'muted small' }, 'The latest 100 sign-ins, report views, status changes and account changes.'))),
+    h('div', { class: 'card-head' }, h('div', null, h('h2', null, 'Latest activity'), h('p', { class: 'muted small' }, 'The latest 100 sign-ins, report and evidence views, status changes and account changes.'))),
     box));
   load();
 }

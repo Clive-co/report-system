@@ -16,9 +16,9 @@ const isProd = process.env.NODE_ENV === 'production';
 // This MUST be set before any middleware (rate-limit especially) reads req.ip.
 app.set('trust proxy', 1);
 
-// The dashboard is served from this same server, so its CSP can be strict:
-// only our own scripts/styles, and evidence images/videos from R2 signed links.
-const R2_HOSTS = 'https://*.r2.cloudflarestorage.com';
+// The dashboard is served from this same server, so its CSP can be strict: everything
+// (scripts, styles, images, video) comes from our own origin. Evidence is
+// streamed through /api/admin/media/:id/stream, so the browser never talks to R2 directly.
 app.use(
   helmet({
     contentSecurityPolicy: {
@@ -27,8 +27,8 @@ app.use(
         'default-src': ["'self'"],
         'script-src': ["'self'"],
         'style-src': ["'self'"],
-        'img-src': ["'self'", 'data:', R2_HOSTS],
-        'media-src': ["'self'", R2_HOSTS],
+        'img-src': ["'self'", 'data:'],
+        'media-src': ["'self'"],
         'connect-src': ["'self'"],
         'frame-ancestors': ["'none'"],
         'form-action': ["'self'"],
@@ -93,6 +93,9 @@ app.use(
     standardHeaders: true,
     legacyHeaders: false,
     validate: { xForwardedForHeader: false },
+    // video playback makes many range requests, and officials often share one office IP;
+    // these requests are already authenticated and role-checked
+    skip: (req) => req.originalUrl.startsWith('/api/admin/media/'),
   }),
   adminRouter
 );

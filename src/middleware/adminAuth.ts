@@ -6,6 +6,8 @@
 import type { Request, Response, NextFunction } from 'express';
 import crypto from 'crypto';
 import { prisma } from '../db';
+import { permissionsFor } from '../auth/permissions';
+import type { Permission, Role } from '../auth/permissions';
 
 export const COOKIE_NAME = 'icpc_sid';
 const IDLE_MS = 30 * 60 * 1000; // sign out after 30 min of inactivity
@@ -17,9 +19,21 @@ export type AuthedAdmin = {
   id: string;
   email: string;
   name: string;
-  role: 'SUPER_ADMIN' | 'OFFICER';
+  role: Role;
   mustChangePassword: boolean;
+  permissions: Permission[];
 };
+
+export function toAuthed(a: { id: string; email: string; name: string; role: string; mustChangePassword: boolean }): AuthedAdmin {
+  return {
+    id: a.id,
+    email: a.email,
+    name: a.name,
+    role: a.role as Role,
+    mustChangePassword: a.mustChangePassword,
+    permissions: permissionsFor(a.role),
+  };
+}
 
 declare global {
   namespace Express {
@@ -126,8 +140,7 @@ export async function requireAdmin(req: Request, res: Response, next: NextFuncti
       await prisma.adminSession.update({ where: { id: session.id }, data: { lastSeenAt: new Date() } });
     }
 
-    const a = session.admin;
-    req.admin = { id: a.id, email: a.email, name: a.name, role: a.role, mustChangePassword: a.mustChangePassword };
+    req.admin = toAuthed(session.admin);
     req.sessionId = session.id;
     next();
   } catch (err) {
@@ -144,9 +157,9 @@ export function enforcePasswordChange(req: Request, res: Response, next: NextFun
   next();
 }
 
-export function requireRole(role: 'SUPER_ADMIN') {
+export function requirePermission(permission: Permission) {
   return (req: Request, res: Response, next: NextFunction) => {
-    if (req.admin?.role !== role) return res.status(403).json({ error: 'Forbidden' });
+    if (!req.admin?.permissions.includes(permission)) return res.status(403).json({ error: 'Forbidden' });
     next();
   };
 }

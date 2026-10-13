@@ -2,18 +2,20 @@
 import { Router, Request } from 'express';
 import rateLimit from 'express-rate-limit';
 import { z } from 'zod';
-import { Prisma, ReportStatus, AdminRole } from '@prisma/client';
+import { Readable } from 'stream';
+import { GetObjectCommand } from '@aws-sdk/client-s3';
+import { Prisma, ReportStatus } from '@prisma/client';
 import { prisma } from '../db';
 import { decrypt } from '../crypto';
+import { r2 } from '../services/r2';
 import { asyncHandler } from '../utils/asyncHandler';
 import { sanitizeText } from '../utils/sanitize';
 import { normalizeTrackingCode } from '../utils/trackingCode';
 import {
   hashPassword, verifyPassword, dummyHash, validatePasswordStrength, generateTempPassword,
 } from '../utils/password';
-import { getFreshMediaLink } from '../services/media';
 import {
-  csrfGuard, requireAdmin, enforcePasswordChange, requireRole,
+  csrfGuard, requireAdmin, enforcePasswordChange, requirePermission, toAuthed,
   createSession, setSessionCookie, clearSessionCookie, hashToken, readSessionToken,
 } from '../middleware/adminAuth';
 
@@ -93,7 +95,7 @@ router.post('/auth/login', loginLimiter, asyncHandler(async (req, res) => {
 
   const token = await createSession(admin.id, req); // fresh token every login (no session fixation)
   setSessionCookie(res, token);
-  req.admin = { id: admin.id, email: admin.email, name: admin.name, role: admin.role, mustChangePassword: admin.mustChangePassword };
+  req.admin = toAuthed(admin);
   await audit(req, 'LOGIN');
 
   res.json({ admin: req.admin });
@@ -166,7 +168,7 @@ const listQuery = z.object({
 
 // Keyset pagination on (createdAt desc, id desc): cost stays flat however deep you scroll,
 // unlike OFFSET which gets slower with every page on a multi-million-row table.
-router.get('/reports', asyncHandler(async (req, res) => {
+router.get('/reports', requirePermission('reports:view'), asyncHandler(async (req, res) => {
   const parsed = listQuery.safeParse(req.query);
   if (!parsed.success) return res.status(400).json({ error: 'Invalid filters' });
   const { status, state, q, limit, cursor } = parsed.data;
@@ -180,7 +182,7 @@ router.get('/reports', asyncHandler(async (req, res) => {
     const code = normalizeTrackingCode(search);
     const or: Prisma.ReportWhereInput[] = [];
     if (code) or.push({ trackingCode: code });
-    if (/^[\w-]{20,40}$/.test(search)) or.push({ id: search }); // internal reference from the email
+    if (/^[\w-]{20,40}$/.test(search)) or.push({ id: search }); // internal reference
     if (or.length === 0) return res.json({ items: [], nextCursor: null });
     and.push({ OR: or });
   }
@@ -251,11 +253,11 @@ async function getStats() {
   return data;
 }
 
-router.get('/reports/stats', asyncHandler(async (_req, res) => {
+router.get('/reports/stats', requirePermission('reports:view'), asyncHandler(async (_req, res) => {
   res.json(await getStats());
 }));
 
-router.get('/reports/:id', asyncHandler(async (req, res) => {
+router.get('/reports/:id', requirePermission('reports:view'), asyncHandler(async (req, res) => {
   const report = await prisma.report.findUnique({
     where: { id: req.params.id },
     select: {
@@ -274,23 +276,85 @@ router.get('/reports/:id', asyncHandler(async (req, res) => {
   });
   if (!report) return res.status(404).json({ error: 'Report not found' });
 
-  const media = await Promise.all(
-    report.media.map(async (m) => ({
-      id: m.id,
-      type: m.type,
-      name: m.key.split('/').pop() ?? m.key,
-      url: await getFreshMediaLink(m.key), // short-lived signed link
-    }))
-  );
+  // Evidence is only described to roles allowed to view it. No storage URLs are ever sent:
+  // the browser asks for each file through /media/:id/stream, which checks the role every time.
+  const canViewEvidence = req.admin!.permissions.includes('evidence:view');
+  const media = canViewEvidence
+    ? report.media.map((m) => ({
+        id: m.id,
+        type: m.type,
+        name: m.key.split('/').pop() ?? m.key,
+      }))
+    : [];
 
   await audit(req, 'VIEW_REPORT', { reportId: report.id });
 
   const { informant, media: _media, ...rest } = report;
-  res.json({ ...rest, media, hasInformant: !!informant });
+  res.json({
+    ...rest,
+    media,
+    mediaCount: report.media.length,
+    mediaRestricted: !canViewEvidence,
+    hasInformant: !!informant,
+  });
+}));
+
+/* ───────────────────────── EVIDENCE (super admin only) ───────────────────────── */
+
+const CONTENT_TYPES: Record<string, string> = {
+  jpg: 'image/jpeg', jpeg: 'image/jpeg', png: 'image/png',
+  mp4: 'video/mp4', mov: 'video/quicktime',
+  pdf: 'application/pdf',
+  doc: 'application/msword',
+  docx: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+};
+
+// The file is streamed through this server instead of handing the browser a storage link,
+// so the role is checked, and the view logged, on every access. Only the super admin
+// has the 'evidence:view' permission. Files open or download normally (nothing is blocked).
+router.get('/media/:id/stream', requirePermission('evidence:view'), asyncHandler(async (req, res) => {
+  const media = await prisma.media.findUnique({ where: { id: req.params.id }, select: { id: true, key: true, type: true, reportId: true } });
+  if (!media) return res.status(404).json({ error: 'File not found' });
+
+  const ext = (media.key.split('.').pop() ?? '').toLowerCase();
+  const contentType = CONTENT_TYPES[ext];
+  if (!contentType) return res.status(415).json({ error: 'Unsupported file type.' });
+
+  const range = req.headers.range;
+  let obj;
+  try {
+    obj = await r2.send(new GetObjectCommand({ Bucket: process.env.R2_BUCKET!, Key: media.key, Range: range }));
+  } catch (err: any) {
+    if (err?.name === 'InvalidRange') return res.status(416).end();
+    if (err?.name === 'NoSuchKey') return res.status(404).json({ error: 'File not found' });
+    throw err;
+  }
+  if (!obj.Body) return res.status(404).json({ error: 'File not found' });
+
+  // log one "view" per file, not one per video range request
+  if (!range || /^bytes=0-/.test(range)) {
+    await audit(req, 'VIEW_MEDIA', { reportId: media.reportId, meta: { mediaId: media.id, type: media.type } });
+  }
+
+  res.status(range && obj.ContentRange ? 206 : 200);
+  res.setHeader('Content-Type', contentType);
+  if (obj.ContentLength != null) res.setHeader('Content-Length', String(obj.ContentLength));
+  if (obj.ContentRange) res.setHeader('Content-Range', obj.ContentRange);
+  res.setHeader('Accept-Ranges', 'bytes');
+  // images, video and PDFs open in the browser; Word files can't, so they download
+  res.setHeader('Content-Disposition', ext === 'doc' || ext === 'docx' ? `attachment; filename="evidence.${ext}"` : 'inline');
+  res.setHeader('Cache-Control', 'private, no-store');
+  res.setHeader('X-Content-Type-Options', 'nosniff');
+  res.setHeader('Cross-Origin-Resource-Policy', 'same-origin');
+
+  const body = obj.Body as Readable;
+  body.on('error', () => res.destroy());
+  res.on('close', () => body.destroy());
+  body.pipe(res);
 }));
 
 // Informant identity is behind its own explicit call so every reveal is audited.
-router.get('/reports/:id/informant', asyncHandler(async (req, res) => {
+router.get('/reports/:id/informant', requirePermission('informant:view'), asyncHandler(async (req, res) => {
   const report = await prisma.report.findUnique({
     where: { id: req.params.id },
     select: { id: true, informant: true },
@@ -321,7 +385,7 @@ const statusSchema = z.object({
   internalNote: z.string().max(2000).optional(),
 });
 
-router.patch('/reports/:id/status', asyncHandler(async (req, res) => {
+router.patch('/reports/:id/status', requirePermission('reports:update_status'), asyncHandler(async (req, res) => {
   const parsed = statusSchema.safeParse(req.body);
   if (!parsed.success) return res.status(400).json({ error: 'Invalid status update' });
 
@@ -363,26 +427,33 @@ router.patch('/reports/:id/status', asyncHandler(async (req, res) => {
   res.json({ ok: true, status: parsed.data.status, statusUpdatedAt: now });
 }));
 
-/* ───────────────────────── ADMIN MANAGEMENT (super admin) ───────────────────────── */
+/* ───────────────── OFFICER MANAGEMENT (admin manager role) ─────────────────
+ * Admin managers only ever see and touch OFFICER accounts. Super admins and other
+ * admin managers are created and reset from the command line (scripts/), never here,
+ * and there is deliberately no way to create a super admin through the API.
+ */
 
-const adminSelect = {
+const officerSelect = {
   id: true, email: true, name: true, role: true, mustChangePassword: true, lastLoginAt: true, createdAt: true,
 } satisfies Prisma.AdminSelect;
 
-router.get('/admins', requireRole('SUPER_ADMIN'), asyncHandler(async (_req, res) => {
-  const admins = await prisma.admin.findMany({ select: adminSelect, orderBy: { createdAt: 'asc' } });
+router.get('/admins', requirePermission('admins:manage'), asyncHandler(async (_req, res) => {
+  const admins = await prisma.admin.findMany({
+    where: { role: 'OFFICER' },
+    select: officerSelect,
+    orderBy: { createdAt: 'asc' },
+  });
   res.json({ admins });
 }));
 
-const createAdminSchema = z.object({
+const createOfficerSchema = z.object({
   email: z.string().email().max(120),
   name: z.string().trim().min(2).max(80),
-  role: z.nativeEnum(AdminRole),
-});
+}); // any `role` sent by a client is ignored: this endpoint can only create officers
 
-router.post('/admins', requireRole('SUPER_ADMIN'), asyncHandler(async (req, res) => {
-  const parsed = createAdminSchema.safeParse(req.body);
-  if (!parsed.success) return res.status(400).json({ error: 'Enter a valid email, name and role.' });
+router.post('/admins', requirePermission('admins:manage'), asyncHandler(async (req, res) => {
+  const parsed = createOfficerSchema.safeParse(req.body);
+  if (!parsed.success) return res.status(400).json({ error: 'Enter a valid email and name.' });
 
   const tempPassword = generateTempPassword();
   try {
@@ -390,24 +461,28 @@ router.post('/admins', requireRole('SUPER_ADMIN'), asyncHandler(async (req, res)
       data: {
         email: parsed.data.email.trim().toLowerCase(),
         name: sanitizeText(parsed.data.name),
-        role: parsed.data.role,
+        role: 'OFFICER',
         passwordHash: await hashPassword(tempPassword),
         mustChangePassword: true,
       },
-      select: adminSelect,
+      select: officerSelect,
     });
-    await audit(req, 'ADMIN_CREATED', { meta: { email: admin.email, role: admin.role } });
+    await audit(req, 'OFFICER_CREATED', { meta: { email: admin.email } });
     // The temporary password is shown once and never stored in readable form.
     res.status(201).json({ admin, tempPassword });
   } catch (err: any) {
-    if (err?.code === 'P2002') return res.status(409).json({ error: 'An admin with that email already exists.' });
+    if (err?.code === 'P2002') return res.status(409).json({ error: 'An account with that email already exists.' });
     throw err;
   }
 }));
 
-router.post('/admins/:id/reset-password', requireRole('SUPER_ADMIN'), asyncHandler(async (req, res) => {
-  const target = await prisma.admin.findUnique({ where: { id: req.params.id }, select: { id: true, email: true } });
-  if (!target) return res.status(404).json({ error: 'Admin not found' });
+async function findOfficer(id: string) {
+  return prisma.admin.findFirst({ where: { id, role: 'OFFICER' }, select: { id: true, email: true } });
+}
+
+router.post('/admins/:id/reset-password', requirePermission('admins:manage'), asyncHandler(async (req, res) => {
+  const target = await findOfficer(req.params.id);
+  if (!target) return res.status(404).json({ error: 'Officer not found' });
 
   const tempPassword = generateTempPassword();
   await prisma.$transaction([
@@ -417,27 +492,22 @@ router.post('/admins/:id/reset-password', requireRole('SUPER_ADMIN'), asyncHandl
     }),
     prisma.adminSession.deleteMany({ where: { adminId: target.id } }), // force sign-out everywhere
   ]);
-  await audit(req, 'ADMIN_PASSWORD_RESET', { meta: { email: target.email } });
+  await audit(req, 'OFFICER_PASSWORD_RESET', { meta: { email: target.email } });
   res.json({ tempPassword });
 }));
 
-router.delete('/admins/:id', requireRole('SUPER_ADMIN'), asyncHandler(async (req, res) => {
-  if (req.params.id === req.admin!.id) return res.status(400).json({ error: "You can't remove your own account." });
-
-  const target = await prisma.admin.findUnique({ where: { id: req.params.id }, select: { id: true, email: true, role: true } });
-  if (!target) return res.status(404).json({ error: 'Admin not found' });
-
-  if (target.role === 'SUPER_ADMIN') {
-    const others = await prisma.admin.count({ where: { role: 'SUPER_ADMIN', id: { not: target.id } } });
-    if (others === 0) return res.status(400).json({ error: 'You cannot remove the last super admin.' });
-  }
+router.delete('/admins/:id', requirePermission('admins:manage'), asyncHandler(async (req, res) => {
+  const target = await findOfficer(req.params.id);
+  if (!target) return res.status(404).json({ error: 'Officer not found' });
 
   await prisma.admin.delete({ where: { id: target.id } }); // sessions cascade → access ends immediately
-  await audit(req, 'ADMIN_DELETED', { meta: { email: target.email, role: target.role } });
+  await audit(req, 'OFFICER_DELETED', { meta: { email: target.email } });
   res.json({ ok: true });
 }));
 
-router.get('/audit', requireRole('SUPER_ADMIN'), asyncHandler(async (_req, res) => {
+/* ───────────────────────────── ACTIVITY LOG (super admin) ───────────────────────────── */
+
+router.get('/audit', requirePermission('audit:view'), asyncHandler(async (_req, res) => {
   const logs = await prisma.auditLog.findMany({
     orderBy: { createdAt: 'desc' },
     take: 100,

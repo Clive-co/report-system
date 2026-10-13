@@ -17,9 +17,11 @@ enum ReportStatus {
   DISMISSED
 }
 
+// What each role can do is defined in src/auth/permissions.ts
 enum AdminRole {
-  SUPER_ADMIN // can manage admin accounts and read the activity log
-  OFFICER     // can view reports and update statuses
+  SUPER_ADMIN   // unit director: reads reports, evidence and the activity log. Exactly one exists.
+  ADMIN_MANAGER // creates/removes officers; works reports; no evidence, no activity log
+  OFFICER       // works reports (status updates); no evidence, no admin tools
 }
 
 model Report {
