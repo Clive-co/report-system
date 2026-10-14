@@ -49,8 +49,9 @@
   --received: #3555a8;      --received-bg: #e5ebf8;
   --review: #8a5d00;        --review-bg: #fbf0d3;
   --investigating: #7a3fa0; --investigating-bg: #f0e5f7;
-  --resolved: #0b7a43;      --resolved-bg: #dcf0e4;
-  --dismissed: #59625e;     --dismissed-bg: #e6e9e7;
+  --court: #0f6b73;         --court-bg: #d9eff1;
+  --refiled: #b04a16;       --refiled-bg: #fbe4d6;
+  --closed: #0b7a43;        --closed-bg: #dcf0e4;
 
   --skel-a: #e6ebe8;
   --skel-b: #f3f6f4;
@@ -89,8 +90,9 @@
   --received: #8fa9ee;      --received-bg: #1a2442;
   --review: #efc15a;        --review-bg: #33280c;
   --investigating: #c79bec; --investigating-bg: #2b1a3a;
-  --resolved: #5fd194;      --resolved-bg: #11301f;
-  --dismissed: #a3aeaa;     --dismissed-bg: #232b28;
+  --court: #5fcfd8;         --court-bg: #0f2c30;
+  --refiled: #f2a273;       --refiled-bg: #3a2013;
+  --closed: #5fd194;        --closed-bg: #11301f;
 
   --skel-a: #1b2721;
   --skel-b: #25342c;
@@ -104,8 +106,9 @@
 [data-status="RECEIVED"]      { --c: var(--received);      --c-bg: var(--received-bg); }
 [data-status="UNDER_REVIEW"]  { --c: var(--review);        --c-bg: var(--review-bg); }
 [data-status="INVESTIGATING"] { --c: var(--investigating); --c-bg: var(--investigating-bg); }
-[data-status="RESOLVED"]      { --c: var(--resolved);      --c-bg: var(--resolved-bg); }
-[data-status="DISMISSED"]     { --c: var(--dismissed);     --c-bg: var(--dismissed-bg); }
+[data-status="IN_COURT"]      { --c: var(--court);         --c-bg: var(--court-bg); }
+[data-status="REFILED"]       { --c: var(--refiled);       --c-bg: var(--refiled-bg); }
+[data-status="CLOSED"]        { --c: var(--closed);        --c-bg: var(--closed-bg); }
 
 /* ───────── base ───────── */
 * { box-sizing: border-box; }
@@ -135,9 +138,6 @@ h3 { font-size: 0.95rem; font-weight: 650; }
   padding: 8px 14px; border-radius: 8px; font-weight: 650; text-decoration: none;
 }
 .skip:focus { top: 12px; }
-
-/* ───────── logo ───────── */
-.logo-img { background: transparent; object-fit: contain; flex: none; }
 
 /* ───────── buttons ───────── */
 .btn {
@@ -291,7 +291,7 @@ h3 { font-size: 0.95rem; font-weight: 650; }
 .dist .seg.empty { flex: 1; background: var(--skel-a); }
 .dist.loading { animation: pulse 1.4s ease-in-out infinite; }
 @keyframes pulse { 50% { opacity: 0.5; } }
-.tiles { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 10px; }
+.tiles { display: grid; grid-template-columns: repeat(6, minmax(0, 1fr)); gap: 10px; }
 .tile {
   display: grid; gap: 2px; text-align: left; padding: 12px 14px; border: 1px solid var(--line); border-radius: var(--radius);
   background: var(--surface); position: relative;

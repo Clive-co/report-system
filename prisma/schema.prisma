@@ -13,8 +13,9 @@ enum ReportStatus {
   RECEIVED
   UNDER_REVIEW
   INVESTIGATING
-  RESOLVED
-  DISMISSED
+  IN_COURT
+  REFILED
+  CLOSED
 }
 
 // What each role can do is defined in src/auth/permissions.ts
