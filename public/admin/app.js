@@ -282,19 +282,17 @@ function passwordInput(autocomplete, extra = {}) {
 
 function authLayout(card) {
   return h('div', { class: 'auth' },
-    h('div', { class: 'side-brand' },
-      h('img', {
-        class: 'logo',
-        src: '/admin/assets/icpc-logo.png',
-        alt: '',
-      }),
-      'ICPC case desk',
+    h('section', { class: 'auth-brand' },
+      h('div', { class: 'mark' },
+        h('img', { class: 'logo logo-img', src: '/admin/assets/icpc-logo.png', alt: '' }),
+        'ICPC case desk'
+      ),
       h('div', { class: 'pitch' },
         h('h2', null, 'Every report, reviewed and on record.'),
         h('p', null, 'Read incoming reports, move them through review, and keep a trail of who did what.')
       ),
       h('ul', { class: 'pitch' },
-        h('li', null, icon('Lock', 18), 'Informant details are visible to the super admin only, and every view is logged'),
+        h('li', null, icon('Lock', 18), 'Informant details open only on request and are logged'),
         h('li', null, icon('Clock', 18), 'Evidence is visible to the super admin only, and every view is logged'),
         h('li', null, icon('ScrollText', 18), 'Every status change is recorded')
       )
@@ -530,7 +528,7 @@ function renderReportsView(main) {
   );
   updateFilterBar();
   renderOverview();
-  if (state.stats) fillStates();
+  fillStates();
   loadStats();
   refreshList();
 }
@@ -540,10 +538,25 @@ function updateFilterBar() {
   if (els.clear) els.clear.classList.toggle('hidden', !(f.status || f.state || f.q));
 }
 
+const NG_STATES = ['Abia','Adamawa','Akwa Ibom','Anambra','Bauchi','Bayelsa','Benue','Borno','Cross River','Delta','Ebonyi','Edo','Ekiti','Enugu','FCT','Gombe','Imo','Jigawa','Kaduna','Kano','Katsina','Kebbi','Kogi','Kwara','Lagos','Nasarawa','Niger','Ogun','Ondo','Osun','Oyo','Plateau','Rivers','Sokoto','Taraba','Yobe','Zamfara'];
+
+function stateOptions() {
+  const fromData = (state.stats && state.stats.states) || [];
+  const byKey = new Map(NG_STATES.map((s) => [s.toLowerCase(), s]));
+  // if the data already calls the capital something else, don't add a duplicate "FCT"
+  if (fromData.some((s) => /^(fct|abuja|federal capital)/i.test(s))) byKey.delete('fct');
+  // the data's own spelling wins, so the filter value matches what is stored
+  for (const s of fromData) byKey.set(s.toLowerCase(), s);
+  return [...byKey.values()].sort((a, b) => a.localeCompare(b));
+}
+
 function fillStates() {
-  if (!els.stateSelect || !state.stats) return;
+  if (!els.stateSelect) return;
   const keep = state.filters.state;
-  els.stateSelect.replaceChildren(h('option', { value: '' }, 'All states'), state.stats.states.map((s) => h('option', { value: s }, s)));
+  els.stateSelect.replaceChildren(
+    h('option', { value: '' }, 'All states'),
+    stateOptions().map((s) => h('option', { value: s }, s))
+  );
   els.stateSelect.value = keep;
 }
 
@@ -671,14 +684,16 @@ function renderList() {
       )
     )
   );
-  els.more.replaceChildren(
-    state.nextCursor ? h('button', { class: 'btn', type: 'button', onClick: async (e) => {
+  if (state.nextCursor) {
+    els.more.replaceChildren(h('button', { class: 'btn', type: 'button', onClick: async (e) => {
       const btn = e.currentTarget;
       setBusy(btn, true);
       await loadMore(false);
       setBusy(btn, false);
-    } }, 'Load older reports') : null
-  );
+    } }, 'Load older reports'));
+  } else {
+    els.more.replaceChildren();
+  }
 }
 
 function markSelected() {
@@ -748,7 +763,7 @@ function renderDetail(r) {
     ? h('p', { class: 'muted' }, 'Reported anonymously.')
     : can('informant:view')
       ? [showBtn, informantBox]
-      : h('p', { class: 'muted' }, 'Only the super admin can view informant details.');
+      : h('p', { class: 'muted' }, 'Your role cannot view informant details.');
 
   /* evidence: only for roles that are allowed to see it (super admin) */
   const evidenceCount = r.mediaRestricted ? r.mediaCount : r.media.length;
