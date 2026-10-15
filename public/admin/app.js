@@ -553,9 +553,10 @@ function stateOptions() {
 function fillStates() {
   if (!els.stateSelect) return;
   const keep = state.filters.state;
+  // Options must be passed one by one (spread): replaceChildren turns an array into text.
   els.stateSelect.replaceChildren(
     h('option', { value: '' }, 'All states'),
-    stateOptions().map((s) => h('option', { value: s }, s))
+    ...stateOptions().map((s) => h('option', { value: s }, s))
   );
   els.stateSelect.value = keep;
 }
